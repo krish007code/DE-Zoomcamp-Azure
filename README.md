@@ -1,4 +1,4 @@
-# NYC Taxi Data Pipeline: Kestra to Azure Synapse
+#  Kestra to Azure Synapse
 
 This repository contains an end-to-end ETL pipeline developed and the project orchestrates the ingestion, storage, and warehousing of NYC Taxi trip data.
 
