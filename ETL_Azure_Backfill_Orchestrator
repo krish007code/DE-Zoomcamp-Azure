@@ -1,0 +1,24 @@
+id: ETL_Azure_Backfill_Orchestrator
+namespace: zoomcamp
+
+description: |
+  Master loop to backfill NYC taxi data for 2021.
+  Triggers the ETL_Azure_pipeline for both taxi types across Jan-July 2021.
+
+tasks:
+  - id: taxi_loop
+    type: io.kestra.plugin.core.flow.ForEach
+    values: ["yellow", "green"]
+    tasks:
+      - id: month_loop
+        type: io.kestra.plugin.core.flow.ForEach
+        values: ["2021-01", "2021-02", "2021-03", "2021-04", "2021-05", "2021-06", "2021-07"]
+        tasks:
+          - id: trigger_etl
+            type: io.kestra.plugin.core.flow.Subflow
+            flowId: ETL_Azure_pipeline
+            namespace: zoomcamp
+            wait: true # Crucial for Synapse concurrency
+            inputs:
+              taxi: "{{ parent.taskrun.value }}"
+              year_month: "{{ taskrun.value }}"
