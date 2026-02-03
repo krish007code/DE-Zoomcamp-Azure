@@ -1,0 +1,112 @@
+id: ETL_Azure_pipeline
+namespace: zoomcamp
+
+inputs:
+  - id: taxi
+    type: SELECT
+    displayName: Select taxi type
+    values: [yellow, green]
+    defaults: green
+  - id: year_month
+    type: STRING
+    displayName: Year-Month (YYYY-MM)
+    defaults: "2020-01"
+
+variables:
+  file_name: "{{inputs.taxi}}_tripdata_{{inputs.year_month}}.csv"
+  table_name: "{{inputs.taxi}}_tripdata_ext"
+  
+  # Pre-render SAS token to avoid rendering issues
+  sas_token: "{{kv('AZURE_STORAGE_SAS_TOKEN')}}"
+  
+  create_credential_sql: |
+    CREATE DATABASE SCOPED CREDENTIAL AzureBlobStorageCredential 
+    WITH IDENTITY = 'Shared Access Signature', 
+    SECRET = '{{kv('AZURE_STORAGE_SAS_TOKEN')}}'
+  
+  create_table_sql: |
+    CREATE EXTERNAL TABLE [{{inputs.taxi}}_tripdata_ext]
+    (
+        VendorID NVARCHAR(10), pickup_datetime NVARCHAR(50), dropoff_datetime NVARCHAR(50),
+        passenger_count NVARCHAR(10), trip_distance NVARCHAR(20), RatecodeID NVARCHAR(10),
+        store_and_fwd_flag NVARCHAR(1), PULocationID NVARCHAR(10), DOLocationID NVARCHAR(10),
+        payment_type NVARCHAR(10), fare_amount NVARCHAR(20), extra NVARCHAR(20),
+        mta_tax NVARCHAR(20), tip_amount NVARCHAR(20), tolls_amount NVARCHAR(20),
+        improvement_surcharge NVARCHAR(20), total_amount NVARCHAR(20), congestion_surcharge NVARCHAR(20)
+    )
+    WITH (
+      LOCATION = '{{inputs.taxi}}_tripdata_{{inputs.year_month}}.csv', 
+      DATA_SOURCE = AzureBlobStorage, 
+      FILE_FORMAT = CSVFileFormat
+    )
+  
+  # Pre-baked SQL variable to bypass the JDBC rendering bug
+
+tasks:
+  - id: extract
+    type: io.kestra.plugin.scripts.shell.Commands
+    outputFiles:
+      - "data.csv"
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      TAXI: "{{inputs.taxi}}"
+      DATE: "{{inputs.year_month}}"
+    commands:
+      - wget -qO- https://github.com/DataTalksClub/nyc-tlc-data/releases/download/${TAXI}/${TAXI}_tripdata_${DATE}.csv.gz | gunzip > data.csv
+
+  - id: upload_to_blob
+    type: io.kestra.plugin.azure.storage.blob.Upload
+    endpoint: "https://{{kv('AZURE_STORAGE_ACCOUNT')}}.blob.core.windows.net"
+    sasToken: "{{kv('AZURE_STORAGE_SAS_TOKEN')}}"
+    from: "{{ outputs.extract.outputFiles['data.csv'] }}"
+    name: "{{vars.file_name}}"
+    container: "{{kv('AZURE_CONTAINER_NAME')}}"
+
+  # --- CLEANUP (Every command in its own task, no semicolons) ---
+
+  - id: drop_table
+    type: io.kestra.plugin.jdbc.sqlserver.Query
+    url: jdbc:sqlserver://{{kv('AZURE_SYNAPSE_SERVER')}}.sql.azuresynapse.net:1433;database={{kv('AZURE_DATABASE')}};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
+    username: "{{kv('AZURE_SQL_USERNAME')}}"
+    password: "{{kv('AZURE_SQL_PASSWORD')}}"
+    sql: "IF EXISTS (SELECT * FROM sys.external_tables WHERE name = '{{vars.table_name}}') DROP EXTERNAL TABLE [{{vars.table_name}}]"
+
+  - id: drop_datasource
+    type: io.kestra.plugin.jdbc.sqlserver.Query
+    url: jdbc:sqlserver://{{kv('AZURE_SYNAPSE_SERVER')}}.sql.azuresynapse.net:1433;database={{kv('AZURE_DATABASE')}};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
+    username: "{{kv('AZURE_SQL_USERNAME')}}"
+    password: "{{kv('AZURE_SQL_PASSWORD')}}"
+    sql: "IF EXISTS (SELECT * FROM sys.external_data_sources WHERE name = 'AzureBlobStorage') DROP EXTERNAL DATA SOURCE AzureBlobStorage"
+
+  - id: drop_credential
+    type: io.kestra.plugin.jdbc.sqlserver.Query
+    url: jdbc:sqlserver://{{kv('AZURE_SYNAPSE_SERVER')}}.sql.azuresynapse.net:1433;database={{kv('AZURE_DATABASE')}};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
+    username: "{{kv('AZURE_SQL_USERNAME')}}"
+    password: "{{kv('AZURE_SQL_PASSWORD')}}"
+    sql: "IF EXISTS (SELECT * FROM sys.database_scoped_credentials WHERE name = 'AzureBlobStorageCredential') DROP DATABASE SCOPED CREDENTIAL AzureBlobStorageCredential"
+
+  - id: create_credential
+    type: io.kestra.plugin.jdbc.sqlserver.Query
+    url: jdbc:sqlserver://{{kv('AZURE_SYNAPSE_SERVER')}}.sql.azuresynapse.net:1433;database={{kv('AZURE_DATABASE')}};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
+    username: "{{kv('AZURE_SQL_USERNAME')}}"
+    password: "{{kv('AZURE_SQL_PASSWORD')}}"
+    sql: "{{vars.create_credential_sql}}"
+
+  - id: create_datasource
+    type: io.kestra.plugin.jdbc.sqlserver.Query
+    url: jdbc:sqlserver://{{kv('AZURE_SYNAPSE_SERVER')}}.sql.azuresynapse.net:1433;database={{kv('AZURE_DATABASE')}};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
+    username: "{{kv('AZURE_SQL_USERNAME')}}"
+    password: "{{kv('AZURE_SQL_PASSWORD')}}"
+    sql: "CREATE EXTERNAL DATA SOURCE AzureBlobStorage WITH (TYPE = HADOOP, LOCATION = 'wasbs://{{kv('AZURE_CONTAINER_NAME')}}@{{kv('AZURE_STORAGE_ACCOUNT')}}.blob.core.windows.net/', CREDENTIAL = AzureBlobStorageCredential)"
+
+  - id: create_external_table
+    type: io.kestra.plugin.jdbc.sqlserver.Query
+    url: jdbc:sqlserver://{{kv('AZURE_SYNAPSE_SERVER')}}.sql.azuresynapse.net:1433;database={{kv('AZURE_DATABASE')}};encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.sql.azuresynapse.net;loginTimeout=30;
+    username: "{{kv('AZURE_SQL_USERNAME')}}"
+    password: "{{kv('AZURE_SQL_PASSWORD')}}"
+    # Rendering here via variable to avoid HDFS NullPointerException
+    sql: "{{vars.create_table_sql}}"
+
+  - id: purge_files
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
